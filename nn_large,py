@@ -1,0 +1,78 @@
+import torch
+import torch.nn as nn
+import numpy as np
+from PIL import Image
+import argparse
+
+class SineLayer(nn.Module):
+    def __init__(self, in_features, out_features, is_first=False, omega_0=30):
+        super().__init__()
+        self.in_features = in_features
+        self.omega_0 = omega_0
+        self.is_first = is_first
+        self.linear = nn.Linear(in_features, out_features)
+        self.init_weights()
+        
+    def init_weights(self):
+        with torch.no_grad():
+            if self.is_first:
+                self.linear.weight.uniform_(-1 / self.in_features, 1 / self.in_features)
+            else:
+                bound = np.sqrt(6 / self.in_features) / self.omega_0
+                self.linear.weight.uniform_(-bound, bound)
+                
+    def forward(self, input):
+        return torch.sin(self.omega_0 * self.linear(input))
+
+class Siren(nn.Module):
+    def __init__(self, in_features=2, hidden_features=256, hidden_layers=3, out_features=3, omega_0=30):
+        super().__init__()
+        layers = []
+        layers.append(SineLayer(in_features, hidden_features, is_first=True, omega_0=omega_0))
+
+        for _ in range(hidden_layers):
+            layers.append(SineLayer(hidden_features, hidden_features, is_first=False, omega_0=omega_0))
+        final_linear = nn.Linear(hidden_features, out_features)
+        with torch.no_grad():
+            bound = np.sqrt(6 / hidden_features) / omega_0
+            final_linear.weight.uniform_(-bound, bound)
+        layers.append(final_linear)
+        self.net = nn.Sequential(*layers)
+        
+    def forward(self, coords):
+        return self.net(coords)
+
+def generate_image(width, height, output_filename, model_path="siren_model_state_dict.pth"):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print("Using device:", device)
+    
+    model = Siren(in_features=2, hidden_features=256, hidden_layers=3, out_features=3, omega_0=30).to(device)
+    state_dict = torch.load(model_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    
+    xs = np.linspace(-1, 1, width)
+    ys = np.linspace(-1, 1, height)
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    coords = np.stack([grid_x, grid_y], axis=-1)  # shape: [height, width, 2]
+    coords = torch.tensor(coords, dtype=torch.float32).reshape(-1, 2).to(device)
+    
+    with torch.no_grad():
+        output = model(coords).reshape(height, width, 3).cpu().numpy()
+    output = np.clip(output, 0, 1)
+    output_uint8 = (output * 255).astype(np.uint8)
+    image = Image.fromarray(output_uint8)
+    image.save(output_filename)
+    print(f"Saved output image as {output_filename}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Generate an image using a trained SIREN model."
+    )
+    parser.add_argument("--width", type=int, default=1024, help="Width of the output image (default: 1024)")
+    parser.add_argument("--height", type=int, default=1024, help="Height of the output image (default: 1024)")
+    parser.add_argument("--output", type=str, default="output_image.png", help="Output filename (default: output_image.png)")
+    parser.add_argument("--model", type=str, default="siren_model_state_dict.pth", help="Path to the saved model state dict")
+    
+    args = parser.parse_args()
+    generate_image(args.width, args.height, args.output, args.model)
